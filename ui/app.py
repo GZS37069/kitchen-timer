@@ -18,13 +18,13 @@ from audio.alerts import AudioWorker
 
 
 class KitchenTimerApp:
-    def __init__(self, command_queue: queue.Queue, shutdown_event: threading.Event):
+    def __init__(self, command_queue: queue.Queue, shutdown_event: threading.Event, audio: AudioWorker = None):
         self._cmd_q = command_queue
         self._shutdown = shutdown_event
 
         # Core components
         self._timer_mgr = TimerManager()
-        self._audio = AudioWorker(beep_path=self._asset("assets/beep.wav"))
+        self._audio = audio or AudioWorker(beep_path=self._asset("assets/beep.wav"))
         self._was_active = False  # track previous active state for minimize logic
 
         # Register callbacks
@@ -41,6 +41,20 @@ class KitchenTimerApp:
 
         # Allow Escape to exit fullscreen / quit
         self._root.bind("<Escape>", lambda e: self._on_close())
+
+        # Bottom transcript banner (pack before outer so it docks to bottom)
+        self._transcript_label = tk.Label(
+            self._root,
+            text="",
+            bg="#0d0d1a",
+            fg="#8888aa",
+            font=("Helvetica", 14),
+            anchor="w",
+            padx=12,
+            pady=6,
+        )
+        self._transcript_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self._transcript_clear_id = None
 
         # Top-level horizontal layout: sidebar | timer grid
         outer = tk.Frame(self._root, bg=ROOT_BG)
@@ -87,7 +101,7 @@ class KitchenTimerApp:
     def _poll_and_tick(self):
         try:
             if self._shutdown.is_set():
-                self._root.destroy()
+                self._quit()
                 return
 
             # 1. Drain command queue
@@ -156,6 +170,34 @@ class KitchenTimerApp:
         elif t == "QUIT":
             self._on_close()
 
+        elif t == "_HEARD":
+            self._show_transcript(cmd.get("text", ""), cmd.get("cmd"))
+
+    def _show_transcript(self, text: str, parsed_cmd: dict | None):
+        """Update the bottom banner with the heard transcript and parsed result."""
+        if self._transcript_clear_id is not None:
+            self._root.after_cancel(self._transcript_clear_id)
+
+        if parsed_cmd:
+            t = parsed_cmd.get("type", "?")
+            name = parsed_cmd.get("name", "")
+            duration = parsed_cmd.get("duration")
+            if duration:
+                detail = f"{name}  {duration}s" if name else f"{duration}s"
+            else:
+                detail = name
+            label = f"▶  \"{text}\"   →   {t}{':  ' + detail if detail else ''}"
+            self._transcript_label.config(fg="#66ffaa", text=label)
+        else:
+            label = f"▶  \"{text}\"   →   not recognized"
+            self._transcript_label.config(fg="#ffaa44", text=label)
+
+        self._transcript_clear_id = self._root.after(5000, self._clear_transcript)
+
+    def _clear_transcript(self):
+        self._transcript_label.config(text="")
+        self._transcript_clear_id = None
+
     def _on_cancel_timer(self, name_key: str):
         """Called by a quadrant's Cancel button."""
         self._cmd_q.put({"type": "CANCEL", "name": name_key})
@@ -183,10 +225,17 @@ class KitchenTimerApp:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _on_close(self):
-        if not self._shutdown.is_set():
-            self._shutdown.set()
+    def _quit(self):
+        """Single shutdown path — says goodbye, then destroys the window."""
+        if hasattr(self, '_quitting'):
+            return
+        self._quitting = True
+        self._shutdown.set()
+        self._audio.speak_and_wait("Goodbye")
         self._root.destroy()
+
+    def _on_close(self):
+        self._quit()
 
     @staticmethod
     def _asset(path: str) -> str:

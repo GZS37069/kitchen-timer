@@ -16,6 +16,10 @@ class AudioWorker:
         self._thread = threading.Thread(target=self._run, daemon=True, name="AudioWorker")
         self._thread.start()
 
+    def ping(self):
+        """Queue a short wake-word acknowledgement ping."""
+        self._queue.put({"action": "PING", "text": ""})
+
     def beep(self):
         """Queue a beep only."""
         self._queue.put({"action": "BEEP", "text": ""})
@@ -27,6 +31,11 @@ class AudioWorker:
     def speak(self, text: str):
         """Queue a TTS-only announcement."""
         self._queue.put({"action": "SPEAK", "text": text})
+
+    def speak_and_wait(self, text: str):
+        """Speak text and block until TTS finishes (for use at shutdown)."""
+        self._queue.put({"action": "SPEAK", "text": text})
+        self._queue.join()
 
     # ------------------------------------------------------------------
     # Worker thread
@@ -40,6 +49,12 @@ class AudioWorker:
             msg = self._queue.get()
             action = msg.get("action")
             text = msg.get("text", "")
+
+            if action == "PING" and pygame_ok:
+                try:
+                    self._play_ping()
+                except Exception as e:
+                    print(f"[audio] ping error: {e}")
 
             if action in ("BEEP", "BEEP_AND_SPEAK") and pygame_ok:
                 try:
@@ -76,6 +91,7 @@ class AudioWorker:
             else:
                 # Generate a simple beep programmatically
                 self._beep_sound = self._generate_beep()
+            self._ping_sound = self._generate_ping()
             return True
         except Exception as e:
             print(f"[audio] pygame init failed (beep disabled): {e}")
@@ -93,6 +109,25 @@ class AudioWorker:
         stereo = np.column_stack([mono, mono])  # shape: (N, 2)
         sound = pygame.sndarray.make_sound(stereo)
         return sound
+
+    def _generate_ping(self):
+        """Generate a short 1200Hz ping to acknowledge wake word detection."""
+        import pygame
+        import numpy as np
+        sample_rate = 22050
+        duration = 0.12
+        freq = 1200
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        # Fade out to avoid click
+        envelope = np.linspace(1.0, 0.0, len(t))
+        mono = (np.sin(2 * np.pi * freq * t) * envelope * 32767 * 1.0).astype(np.int16)
+        stereo = np.column_stack([mono, mono])
+        return pygame.sndarray.make_sound(stereo)
+
+    def _play_ping(self):
+        self._ping_sound.play()
+        length_ms = int(self._ping_sound.get_length() * 1000) + 20
+        self._pygame.time.wait(length_ms)
 
     def _play_beep(self):
         self._beep_sound.play()

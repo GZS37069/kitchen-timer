@@ -135,20 +135,20 @@ _ADD_ALT = re.compile(
 )
 
 _CANCEL = re.compile(
-    _KW + r'\s+(?:cancel|stop|delete|remove|end)\s+(?:the\s+)?'
-    r'([a-z][a-z\s]*?)\s+timer',
+    r'(?:hey\s+)?' + _KW + r'\s+(?:cancel|stop|delete|remove|end)\s+(?:the\s+)?'
+    r'([a-z0-9][a-z0-9\s]*?)(?:\s+timer)?\s*$',
     re.IGNORECASE,
 )
 
 _PAUSE = re.compile(
-    _KW + r'\s+(?:pause|hold|freeze)\s+(?:the\s+)?'
-    r'([a-z][a-z\s]*?)\s+timer',
+    r'(?:hey\s+)?' + _KW + r'\s+(?:pause|hold|freeze)\s+(?:the\s+)?'
+    r'([a-z0-9][a-z0-9\s]*?)(?:\s+timer)?\s*$',
     re.IGNORECASE,
 )
 
 _RESUME = re.compile(
-    _KW + r'\s+(?:resume|continue|unpause|restart)\s+(?:the\s+)?'
-    r'([a-z][a-z\s]*?)\s+timer',
+    r'(?:hey\s+)?' + _KW + r'\s+(?:resume|continue|unpause|restart)\s+(?:the\s+)?'
+    r'([a-z0-9][a-z0-9\s]*?)(?:\s+timer)?\s*$',
     re.IGNORECASE,
 )
 

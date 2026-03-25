@@ -167,9 +167,66 @@ class TimerManager:
     # ------------------------------------------------------------------
 
     def _find(self, name_key: str) -> Optional[int]:
-        """Return slot index for the given name_key, or None."""
+        """Return slot index for the given name_key, or None.
+
+        Match priority:
+          1. Exact match
+          2. Prefix match  (e.g. "pasta" finds "pasta sauce")
+          3. Substring match
+          4. Soundex phonetic match (e.g. "steak" finds "stake")
+        """
         name_key = name_key.strip().lower()
+        # Exact match
         for i, t in enumerate(self._slots):
             if t is not None and t.name_key == name_key:
                 return i
+        # Prefix match (e.g. "pasta" finds "pasta sauce")
+        for i, t in enumerate(self._slots):
+            if t is not None and t.name_key.startswith(name_key):
+                return i
+        # Substring match (e.g. "sauce" finds "pasta sauce")
+        for i, t in enumerate(self._slots):
+            if t is not None and name_key in t.name_key:
+                return i
+        # Soundex phonetic match — handles homophones like "steak"/"stake"
+        search_codes = _soundex_set(name_key)
+        for i, t in enumerate(self._slots):
+            if t is not None and search_codes and search_codes <= _soundex_set(t.name_key):
+                return i
         return None
+
+
+def _soundex(word: str) -> str:
+    """Return 4-character Soundex phonetic code for a single word.
+
+    Both 'steak' and 'stake' produce 'S320', allowing homophones to match.
+    """
+    if not word:
+        return ''
+    word = word.upper()
+    code_map = {
+        'B': '1', 'F': '1', 'P': '1', 'V': '1',
+        'C': '2', 'G': '2', 'J': '2', 'K': '2',
+        'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+        'D': '3', 'T': '3',
+        'L': '4',
+        'M': '5', 'N': '5',
+        'R': '6',
+    }
+    first = word[0]
+    prev_code = code_map.get(first, '0')
+    digits = ''
+    for ch in word[1:]:
+        c = code_map.get(ch, '0')
+        if c != '0' and c != prev_code:
+            digits += c
+        # Vowels reset adjacency so "accent"/"axent" both give A252, not A25
+        prev_code = c if c != '0' else '0'
+        if len(digits) == 3:
+            break
+    return (first + digits).ljust(4, '0')
+
+
+def _soundex_set(name: str) -> set:
+    """Return the set of Soundex codes for each word in a (possibly multi-word) name."""
+    return {_soundex(w) for w in name.split() if w}

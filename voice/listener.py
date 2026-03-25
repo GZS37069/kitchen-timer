@@ -29,9 +29,10 @@ def _wake_word_detected(text: str) -> bool:
 
 
 class VoiceListener:
-    def __init__(self, command_queue: queue.Queue, shutdown_event: threading.Event):
+    def __init__(self, command_queue: queue.Queue, shutdown_event: threading.Event, audio=None):
         self._cmd_q = command_queue
         self._shutdown = shutdown_event
+        self._audio = audio
         self._thread = threading.Thread(target=self._run, daemon=True, name="VoiceListener")
 
     def start(self):
@@ -86,10 +87,14 @@ class VoiceListener:
                     if not _wake_word_detected(text):
                         continue  # not a kitchen command
 
+                    if self._audio:
+                        self._audio.ping()
+
                     # Try to parse the command from this utterance
                     cmd = parse(text)
                     if cmd:
                         print(f"[voice] Parsed: {cmd}")
+                        self._cmd_q.put({"type": "_HEARD", "text": text, "cmd": cmd})
                         self._cmd_q.put(cmd)
                     else:
                         # Wake word heard but no command yet — capture next utterance
@@ -104,9 +109,13 @@ class VoiceListener:
                             cmd = parse(full)
                             if cmd:
                                 print(f"[voice] Parsed: {cmd}")
-                                self._cmd_q.put(cmd)
                             else:
                                 print("[voice] Could not parse command.")
+                            self._cmd_q.put({"type": "_HEARD", "text": utterance, "cmd": cmd})
+                            if cmd:
+                                self._cmd_q.put(cmd)
+                        else:
+                            self._cmd_q.put({"type": "_HEARD", "text": "(no follow-up heard)", "cmd": None})
                 else:
                     # Partial result — just show for debugging
                     partial = json.loads(rec.PartialResult())
