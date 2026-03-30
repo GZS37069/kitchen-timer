@@ -25,8 +25,13 @@ _SECTIONS = [
     ),
     (
         "CANCEL",
-        "kitchen, cancel [name] timer\nor click ✕ CANCEL on the timer",
-        '"kitchen cancel pasta timer"',
+        "kitchen, cancel [name] timer\nkitchen, cancel all timers\nor click ✕ CANCEL on the timer",
+        '"kitchen cancel pasta timer"\n"kitchen cancel all timers"',
+    ),
+    (
+        "REPEAT",
+        "kitchen, repeat\nkitchen, repeat [name] timer",
+        '"kitchen repeat"  (last completed)\n"kitchen repeat steak"',
     ),
 ]
 

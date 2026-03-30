@@ -5,9 +5,11 @@ Owns the root Tk window and the poll_and_tick() heartbeat loop.
 
 import tkinter as tk
 import queue
+import subprocess
 import threading
 import os
 import sys
+import ctypes
 
 from config import ROOT_BG, POLL_INTERVAL_MS
 from timer.manager import TimerManager
@@ -25,7 +27,6 @@ class KitchenTimerApp:
         # Core components
         self._timer_mgr = TimerManager()
         self._audio = audio or AudioWorker(beep_path=self._asset("assets/beep.wav"))
-        self._was_active = False  # track previous active state for minimize logic
 
         # Register callbacks
         self._timer_mgr.on_complete(self._on_timer_complete)
@@ -42,9 +43,12 @@ class KitchenTimerApp:
         # Allow Escape to exit fullscreen / quit
         self._root.bind("<Escape>", lambda e: self._on_close())
 
-        # Bottom transcript banner (pack before outer so it docks to bottom)
+        # Bottom bar: transcript (left) + version (right)
+        bottom_bar = tk.Frame(self._root, bg="#0d0d1a")
+        bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
         self._transcript_label = tk.Label(
-            self._root,
+            bottom_bar,
             text="",
             bg="#0d0d1a",
             fg="#8888aa",
@@ -53,7 +57,19 @@ class KitchenTimerApp:
             padx=12,
             pady=6,
         )
-        self._transcript_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self._transcript_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(
+            bottom_bar,
+            text=self._version_string(),
+            bg="#0d0d1a",
+            fg="#444466",
+            font=("Helvetica", 10),
+            anchor="e",
+            padx=12,
+            pady=6,
+        ).pack(side=tk.RIGHT)
+
         self._transcript_clear_id = None
 
         # Top-level horizontal layout: sidebar | timer grid
@@ -82,6 +98,9 @@ class KitchenTimerApp:
         # System tray
         self._tray = TrayManager(command_queue, shutdown_event)
         self._tray.start(self._root)
+
+        # Screensaver suppression state
+        self._display_awake = False
 
         # Start heartbeat
         self._root.after(POLL_INTERVAL_MS, self._poll_and_tick)
@@ -121,11 +140,10 @@ class KitchenTimerApp:
             for i, state in enumerate(snapshot):
                 self._quadrants[i].update(state)
 
-            # 4. Auto-minimize when all timers clear
-            active = self._timer_mgr.active_count()
-            if active == 0 and self._was_active:
-                self._tray.hide()
-            self._was_active = active > 0
+            # 4. Suppress screensaver while any timer is active
+            self._update_display_lock()
+
+            # (auto-minimize removed — UI stays visible until explicitly closed)
 
         except Exception as e:
             import traceback
@@ -144,15 +162,28 @@ class KitchenTimerApp:
         t = cmd.get("type")
 
         if t == "ADD":
-            self._tray.show()
-            ok = self._timer_mgr.add(cmd["name"], cmd["duration"])
-            print(f"[ui] ADD '{cmd['name']}' {cmd['duration']}s -> {'ok' if ok else 'FULL'}")
-            if not ok:
-                self._audio.speak("All timers are in use")
+            # If a completed timer with this name exists, repeat it in-place instead
+            # of adding a duplicate to a new slot.
+            name_key = cmd["name"].strip().lower()
+            repeated = self._timer_mgr.repeat(name_key, completed_only=True)
+            if repeated:
+                print(f"[ui] ADD '{cmd['name']}' -> completed timer found, repeating in-place")
+                self._audio.clear()
+                self._audio.speak(f"Repeating {repeated}")
+            else:
+                self._tray.show()
+                ok = self._timer_mgr.add(cmd["name"], cmd["duration"])
+                print(f"[ui] ADD '{cmd['name']}' {cmd['duration']}s -> {'ok' if ok else 'FULL'}")
+                if not ok:
+                    self._audio.speak("All timers are in use")
 
         elif t == "CANCEL":
+            self._audio.clear()
             self._timer_mgr.cancel(cmd["name"])
-            # minimize handled automatically in poll_and_tick if no timers remain
+
+        elif t == "CANCEL_ALL":
+            self._audio.clear()
+            self._timer_mgr.cancel_all()
 
         elif t == "PAUSE":
             ok = self._timer_mgr.pause(cmd["name"])
@@ -163,6 +194,17 @@ class KitchenTimerApp:
             ok = self._timer_mgr.resume(cmd["name"])
             if not ok:
                 self._audio.speak(f"No paused timer named {cmd['name']}")
+
+        elif t == "REPEAT":
+            target = cmd.get("name")
+            print(f"[ui] REPEAT requested, name_key={repr(target)}, slots={[(s.name, s.status.name) if s else None for s in self._timer_mgr.snapshot()]}")
+            name = self._timer_mgr.repeat(target)
+            print(f"[ui] REPEAT result: {repr(name)}")
+            if name:
+                self._audio.clear()
+                self._audio.speak(f"Repeating {name}")
+            else:
+                self._audio.speak("No completed timer to repeat")
 
         elif t == "SHOW":
             self._tray.show()
@@ -225,17 +267,48 @@ class KitchenTimerApp:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _update_display_lock(self):
+        """Prevent screensaver/display-off while any timer is active; restore when idle."""
+        # ES_CONTINUOUS = 0x80000000, ES_DISPLAY_REQUIRED = 0x00000002
+        ES_CONTINUOUS       = 0x80000000
+        ES_DISPLAY_REQUIRED = 0x00000002
+        has_active = self._timer_mgr.active_count() > 0
+        if has_active and not self._display_awake:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+            self._display_awake = True
+        elif not has_active and self._display_awake:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            self._display_awake = False
+
     def _quit(self):
         """Single shutdown path — says goodbye, then destroys the window."""
         if hasattr(self, '_quitting'):
             return
         self._quitting = True
         self._shutdown.set()
+        # Release display lock before exit
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
         self._audio.speak_and_wait("Goodbye")
         self._root.destroy()
 
     def _on_close(self):
         self._quit()
+
+    @staticmethod
+    def _version_string() -> str:
+        """Return 'Version 1.MMDDYY' based on the last git commit date."""
+        try:
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%cd", "--date=format:%m%d%y"],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            date = result.stdout.strip()
+            if date:
+                return f"Version 1.{date}"
+        except Exception:
+            pass
+        return "Version 1"
 
     @staticmethod
     def _asset(path: str) -> str:

@@ -15,6 +15,9 @@ _ONES = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
     "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    # Common Vosk mishearings of number words
+    "to": 2, "too": 2,   # "two" → "to" / "too"
+    "ate": 8,            # "eight" → "ate"
 }
 _TENS = {
     "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
@@ -87,6 +90,33 @@ def _parse_duration(text: str) -> Optional[int]:
     return total if found else None
 
 
+def _normalize_duration_phrase(phrase: str) -> str:
+    """Apply the same pre-processing that _parse_duration uses, so _UNIT_RE can find units."""
+    phrase = re.sub(r'(\d+)\s+and\s+a\s+half',
+                    lambda m: str(int(m.group(1)) + 0.5), phrase, flags=re.I)
+    phrase = re.sub(r'\bhalf\s+an?\b', '0.5', phrase, flags=re.I)
+    phrase = re.sub(r'\ba\s+(hours?|minutes?|mins?|seconds?|secs?)\b', r'1 \1', phrase, flags=re.I)
+    return phrase
+
+
+def _split_duration_and_name(phrase: str) -> tuple:
+    """
+    Split a phrase like "2 minute egg" into ("2 minute", "egg").
+    Words after the last time-unit match are treated as the timer name.
+    Returns (duration_phrase, name_or_None).  duration_phrase may be normalized.
+    """
+    normalized = _normalize_duration_phrase(phrase)
+    matches = list(_UNIT_RE.finditer(normalized))
+    if not matches:
+        return phrase, None
+    last = matches[-1]
+    remainder = normalized[last.end():].strip()
+    if remainder:
+        # Use the normalized string so indices are consistent
+        return normalized[:last.end()].strip(), remainder
+    return phrase, None
+
+
 def _duration_label(phrase: str) -> str:
     """
     Produce a short display label from a duration phrase, e.g.
@@ -134,6 +164,11 @@ _ADD_ALT = re.compile(
     re.IGNORECASE,
 )
 
+_CANCEL_ALL = re.compile(
+    r'(?:hey\s+)?' + _KW + r'\s+(?:cancel|stop|delete|remove|end|clear)\s+(?:all|every(?:thing)?)\b',
+    re.IGNORECASE,
+)
+
 _CANCEL = re.compile(
     r'(?:hey\s+)?' + _KW + r'\s+(?:cancel|stop|delete|remove|end)\s+(?:the\s+)?'
     r'([a-z0-9][a-z0-9\s]*?)(?:\s+timer)?\s*$',
@@ -152,6 +187,36 @@ _RESUME = re.compile(
     re.IGNORECASE,
 )
 
+# "kitchen repeat" or "kitchen repeat [the] steak [timer]" or "kitchen repeat 1 minute timer"
+_REPEAT = re.compile(
+    r'(?:hey\s+)?' + _KW + r'\s+repeat'
+    r'(?:\s+(?:the\s+)?([a-z0-9][a-z0-9\s]{0,30})(?:\s+timer)?)?\s*$',
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Timer name resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_timer_name(name: str) -> str:
+    """
+    Normalize a spoken timer reference for slot lookup.
+
+    Handles the case where the user refers to a timer by its duration rather
+    than an explicit name, e.g.:
+      "1 minute"     → "1 min"   (matches slot named "1 Min")
+      "2 minute egg" → "egg"     (duration prefix stripped; name extracted)
+      "pasta"        → "pasta"   (no duration → unchanged)
+    """
+    name = name.strip()
+    duration_phrase, embedded = _split_duration_and_name(name)
+    if embedded:
+        return embedded.strip()
+    if _UNIT_RE.search(duration_phrase):
+        return _duration_label(duration_phrase).lower()
+    return name
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -162,25 +227,46 @@ def parse(text: str) -> Optional[dict]:
     Parse a voice transcript into a command dict, or return None.
 
     Returns one of:
-        {"type": "ADD",    "name": str, "duration": int}
-        {"type": "CANCEL", "name": str}
-        {"type": "PAUSE",  "name": str}
-        {"type": "RESUME", "name": str}
+        {"type": "ADD",        "name": str, "duration": int}
+        {"type": "CANCEL",     "name": str}
+        {"type": "CANCEL_ALL"}
+        {"type": "PAUSE",      "name": str}
+        {"type": "RESUME",     "name": str}
+        {"type": "REPEAT",     "name": str | None}
     """
     text = _normalize_numbers(text.lower().strip())
 
     # Check control commands first (they share verbs with ADD pattern)
+    m = _REPEAT.search(text)
+    if m:
+        raw = m.group(1)
+        if raw:
+            name = re.sub(r'\s*timer\s*$', '', raw, flags=re.IGNORECASE).strip().rstrip(".")
+        else:
+            name = None
+        return {"type": "REPEAT", "name": name}
+
+    if _CANCEL_ALL.search(text):
+        return {"type": "CANCEL_ALL"}
+
     m = _CANCEL.search(text)
     if m:
-        return {"type": "CANCEL", "name": m.group(1).strip().rstrip(".")}
+        name = _resolve_timer_name(m.group(1).strip().rstrip("."))
+        return {"type": "CANCEL", "name": name}
 
     m = _PAUSE.search(text)
     if m:
-        return {"type": "PAUSE", "name": m.group(1).strip().rstrip(".")}
+        name = _resolve_timer_name(m.group(1).strip().rstrip("."))
+        return {"type": "PAUSE", "name": name}
 
     m = _RESUME.search(text)
     if m:
-        return {"type": "RESUME", "name": m.group(1).strip().rstrip(".")}
+        name = _resolve_timer_name(m.group(1).strip().rstrip("."))
+        return {"type": "RESUME", "name": name}
+
+    # Strip a dangling name-separator word at the end with no name following
+    # e.g. "start 5 minute timer for" (user paused) → "start 5 minute timer"
+    text = re.sub(r'\s+(?:for|four|far|named?|called)\s*$', '', text, flags=re.I)
 
     # Try both ADD forms; prefer _ADD (duration-first) over _ADD_ALT (timer-for-duration)
     for pattern in (_ADD, _ADD_ALT):
@@ -189,13 +275,19 @@ def parse(text: str) -> Optional[dict]:
             duration_phrase = m.group(1).strip()
             raw_name = m.group(2)
 
+            # Support "X minute Name timer" — name embedded after the time unit
+            duration_phrase, embedded_name = _split_duration_and_name(duration_phrase)
+
             duration = _parse_duration(duration_phrase)
             if duration is None or duration <= 0:
                 continue  # try next pattern
 
             if raw_name:
+                # Explicit "for/named/called Name" wins over embedded name
                 name = raw_name.strip().rstrip(".")
                 name = re.sub(r'\s*timer\s*$', '', name, flags=re.IGNORECASE).strip()
+            elif embedded_name:
+                name = embedded_name.strip().rstrip(".")
             else:
                 name = _duration_label(duration_phrase)
 

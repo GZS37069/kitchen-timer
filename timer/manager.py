@@ -87,6 +87,48 @@ class TimerManager:
                 return True
         return False
 
+    def repeat(self, name_key: str = None, completed_only: bool = False) -> Optional[str]:
+        """
+        Reset a timer to its original duration and restart it.
+        If name_key is None, targets the most recently completed timer.
+        If completed_only is True, only resets timers in COMPLETED status.
+        Returns the timer's display name on success, None if not found.
+        """
+        if name_key:
+            idx = self._find(name_key)
+            if idx is not None and completed_only:
+                if self._slots[idx].status != TimerStatus.COMPLETED:
+                    idx = None
+            # If name lookup failed, fall back to the single completed timer (if unambiguous)
+            if idx is None:
+                completed = [i for i, t in enumerate(self._slots)
+                             if t is not None and t.status == TimerStatus.COMPLETED]
+                if len(completed) == 1:
+                    idx = completed[0]
+        else:
+            # Find the most recently completed timer
+            idx = None
+            latest = -1.0
+            for i, t in enumerate(self._slots):
+                if t is not None and t.status == TimerStatus.COMPLETED and t.completed_at > latest:
+                    latest = t.completed_at
+                    idx = i
+
+        if idx is None:
+            return None
+        t = self._slots[idx]
+        if t is None:
+            return None
+
+        t.remaining = float(t.total)
+        t.status = TimerStatus.RUNNING
+        t.overtime = 0.0
+        t.completed_at = 0.0
+        t.last_beep_at = 0.0
+        t.announced = {m for m in ANNOUNCE_MILESTONES if m >= t.total}
+        self._last_tick = time.monotonic()
+        return t.name
+
     def cancel(self, name_key: str) -> bool:
         """Cancel a timer by name. Returns True if found."""
         idx = self._find(name_key)
@@ -94,6 +136,15 @@ class TimerManager:
             return False
         self._slots[idx] = None
         return True
+
+    def cancel_all(self) -> int:
+        """Cancel every active timer. Returns the number cancelled."""
+        count = 0
+        for i in range(len(self._slots)):
+            if self._slots[i] is not None:
+                self._slots[i] = None
+                count += 1
+        return count
 
     def pause(self, name_key: str) -> bool:
         """Pause a RUNNING timer. Returns True if found and was running."""

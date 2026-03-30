@@ -37,6 +37,15 @@ class AudioWorker:
         self._queue.put({"action": "SPEAK", "text": text})
         self._queue.join()
 
+    def clear(self):
+        """Drain all pending (not yet started) audio tasks from the queue."""
+        try:
+            while True:
+                self._queue.get_nowait()
+                self._queue.task_done()
+        except queue.Empty:
+            pass
+
     # ------------------------------------------------------------------
     # Worker thread
     # ------------------------------------------------------------------

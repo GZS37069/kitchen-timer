@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import os
+from datetime import datetime
 
 from config import WAKE_WORD, AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SIZE, COMMAND_TIMEOUT_SECS, VOSK_MODEL_PATH
 from voice.parser import parse
@@ -24,8 +25,15 @@ from voice.parser import parse
 # "hey janet", "a kitchen", etc. regardless of how Vosk transcribes "hey"
 _WAKE_RE = re.compile(r'\b\w+\s+(?:kitchen|janet)\b', re.IGNORECASE)
 
+_WAKE_HOUR_START = 5   # 5:00 AM
+_WAKE_HOUR_END   = 20  # 8:00 PM (exclusive)
+
+def _is_active_hours() -> bool:
+    h = datetime.now().hour
+    return _WAKE_HOUR_START <= h < _WAKE_HOUR_END
+
 def _wake_word_detected(text: str) -> bool:
-    return bool(_WAKE_RE.search(text))
+    return _is_active_hours() and bool(_WAKE_RE.search(text))
 
 
 class VoiceListener:
@@ -89,6 +97,12 @@ class VoiceListener:
 
                     if self._audio:
                         self._audio.ping()
+
+                    # Strip anything before the wake word so TTS bleed
+                    # (mic picking up the speaker) can't corrupt the command.
+                    m = _WAKE_RE.search(text)
+                    if m:
+                        text = text[m.start():]
 
                     # Try to parse the command from this utterance
                     cmd = parse(text)
